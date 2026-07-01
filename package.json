@@ -1,0 +1,25 @@
+{
+  "name": "playwright-authentication-flow",
+  "version": "1.0.0",
+  "description": "Playwright examples for reusable authentication with storageState, setup projects, and fixtures.",
+  "main": "index.js",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "report": "playwright show-report"
+  },
+  "keywords": [
+    "playwright",
+    "authentication",
+    "storage-state",
+    "e2e-testing"
+  ],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "devDependencies": {
+    "@playwright/test": "^1.61.1",
+    "@types/node": "^26.0.1"
+  }
+}
