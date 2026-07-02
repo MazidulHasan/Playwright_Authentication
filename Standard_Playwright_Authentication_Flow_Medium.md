@@ -113,6 +113,66 @@ playwright/.auth/admin.json
 
 ---
 
+## Strategy 1: Using `globalSetup`
+
+One common way to prepare authentication is `globalSetup`.
+
+With this strategy, Playwright runs a separate setup function before the test runner starts. That function can open a browser, log in, save the authenticated state, and then close the browser.
+
+The flow looks like this:
+
+```text
+global setup starts
+    opens browser
+    logs in as user
+    saves playwright/.auth/user.json
+test runner starts
+    tests reuse saved auth state
+```
+
+A simple `globalSetup` file can look like this:
+
+```javascript
+const { chromium } = require('@playwright/test');
+
+async function globalSetup() {
+  const browser = await chromium.launch();
+  const page = await browser.newPage();
+
+  await page.goto('https://example.com/index.html');
+  await page.getByRole('textbox', { name: 'Email address or Student ID' }).fill(process.env.USER_EMAIL);
+  await page.getByRole('textbox', { name: 'Password' }).fill(process.env.USER_PASSWORD);
+  await page.getByRole('button', { name: 'Log In' }).click();
+  await page.waitForURL('https://example.com/home.html');
+
+  await page.context().storageState({
+    path: 'playwright/.auth/user.json'
+  });
+
+  await browser.close();
+}
+
+module.exports = globalSetup;
+```
+
+Then you connect it in the Playwright config:
+
+```javascript
+module.exports = {
+  globalSetup: require.resolve('./auth.setup')
+};
+```
+
+This works, and it is easy to understand.
+
+But there is one important limitation: `globalSetup` runs outside the normal Playwright Test lifecycle. So the login flow is not treated like a normal test. You do not get the same clean reporting, tracing, retries, and project-level behavior that you get from a setup project.
+
+That is why I see `globalSetup` as useful for general one-time preparation, but not my first choice for UI authentication.
+
+For authentication, I usually prefer the next strategy.
+
+---
+
 ## The Standard Flow: Setup Project + `storageState`
 
 The most standard Playwright authentication pattern is the setup project pattern.
