@@ -14,19 +14,17 @@ await page.waitForURL('/home');
 
 It works, but it is slow. It also makes tests noisy. If the login page has a temporary issue, every test fails even though the actual feature under test may be fine.
 
-The better approach is simple:
+The better direction is simple:
 
-1. Log in once.
-2. Save the browser state.
-3. Reuse that state in your tests.
+1. Keep login setup outside the main test body.
+2. Make the actual test focus on the feature.
+3. Choose the right strategy as the suite grows.
 
-That saved browser state is what Playwright calls `storageState`.
-
-In this article, I will explain the standard way to build an authentication flow in Playwright, when to use fixtures, and why `globalSetup` is usually not the best choice for UI login anymore.
+In this article, I will explain the common authentication strategies in Playwright, starting with hooks because they are the simplest improvement when you are not using saved storage yet. After that, we will move into `storageState`, `globalSetup`, setup projects, and fixtures.
 
 ---
 
-## The Problem With Logging In Inside Every Test
+## The Baseline Problem: Login Inside Every Test
 
 A beginner Playwright test often looks like this:
 
@@ -53,9 +51,57 @@ You are not really testing login in every test. You are testing dashboard, profi
 
 So the clean question is:
 
-> How can every test start already logged in?
+> How can we remove repeated login code without making the test suite harder to understand?
 
-The answer is `storageState`.
+The first real strategy many people try is hooks.
+
+---
+
+## Strategy 1: Using Hooks
+
+One common approach is to use Playwright hooks, especially `beforeEach` or `beforeAll`.
+
+Hooks are useful when you want to run setup code before tests. For authentication, that usually means logging in before each test or before a group of tests.
+
+Example with `beforeEach`:
+
+```javascript
+const { test, expect } = require('@playwright/test');
+
+test.beforeEach(async ({ page }) => {
+  await page.goto('https://example.com/index.html');
+  await page.getByRole('textbox', { name: 'Email address or Student ID' }).fill(process.env.USER_EMAIL);
+  await page.getByRole('textbox', { name: 'Password' }).fill(process.env.USER_PASSWORD);
+  await page.getByRole('button', { name: 'Log In' }).click();
+  await page.waitForURL('https://example.com/home.html');
+});
+
+test('user can open dashboard', async ({ page }) => {
+  await page.goto('https://example.com/dashboard');
+  await expect(page).toHaveURL('https://example.com/dashboard');
+});
+```
+
+This is already better than copying login steps inside every test body.
+
+The test itself is cleaner:
+
+```text
+beforeEach handles login
+test focuses on the feature
+```
+
+But the main problem is still there: login runs again and again.
+
+If you have ten tests, login runs ten times. If you have one hundred tests, login runs one hundred times. That makes the suite slower and increases the chance of failures caused by the login page instead of the actual feature.
+
+Hooks are good for small proof-of-concept test suites, tests that truly need a fresh login every time, or projects where you do not want to introduce saved browser state yet.
+
+Once the suite starts growing, the repeated login cost becomes harder to ignore. At that point, the next natural step is to stop performing the UI login before every test:
+
+> Log in once, save the browser state, and reuse it.
+
+That brings us to `storageState`.
 
 ---
 
@@ -113,7 +159,7 @@ playwright/.auth/admin.json
 
 ---
 
-## Strategy 1: Using `globalSetup`
+## Strategy 2: Using `globalSetup`
 
 One common way to prepare authentication is `globalSetup`.
 
@@ -157,10 +203,17 @@ module.exports = globalSetup;
 
 Then you connect it in the Playwright config:
 
+way 1: Inside projects
+
 ```javascript
 module.exports = {
   globalSetup: require.resolve('./auth.setup')
 };
+```
+
+way 2: Inside "export default defineConfig"
+```javascript
+globalSetup: './auth.setup.js',
 ```
 
 This works, and it is easy to understand.
@@ -173,7 +226,7 @@ For authentication, I usually prefer the next strategy.
 
 ---
 
-## The Standard Flow: Setup Project + `storageState`
+## Strategy 3: Setup Project + `storageState`
 
 The most standard Playwright authentication pattern is the setup project pattern.
 
@@ -438,7 +491,7 @@ This is a simple and readable way to handle multiple roles when each test only n
 
 ---
 
-## When Fixtures Become Useful
+## Strategy 4: Using Fixtures
 
 Sometimes one test needs multiple logged-in users at the same time.
 
@@ -451,41 +504,74 @@ In that case, switching `test.use({ storageState })` is not enough, because one 
 
 This is where fixtures are useful.
 
-In this project, the fixture idea looks like this:
+In this project, the fixture idea looks like this (fixtures.js) :
 
 ```javascript
-import { test as base } from '@playwright/test';
-import { getAuthenticatedPage } from './helpers/auth';
+const { test: base, expect } = require('@playwright/test');
+const { loginAndGetContext } = require('../helpers/auth/login');
 
-export const test = base.extend({
+const test = base.extend({
   adminPage: async ({ browser }, use) => {
-    const { page, context } = await getAuthenticatedPage(browser, 'admin');
-    await use(page);
-    await context.close();
+    const { page, context } = await loginAndGetContext(browser, 'test1212@gmail.com', 'test1212');
+
+    try {
+      await use(page);
+    } finally {
+      await context.close();
+    }
   },
 
   userPage: async ({ browser }, use) => {
-    const { page, context } = await getAuthenticatedPage(browser, 'regular');
-    await use(page);
-    await context.close();
+    const { page, context } = await loginAndGetContext(browser, 'user1212@gmail.com', 'test1212');
+
+    try {
+      await use(page);
+    } finally {
+      await context.close();
+    }
   }
 });
 
-export { expect } from '@playwright/test';
+module.exports = { test, expect };
+
+```
+
+login.js will have minor global change but the functionality remains the same
+
+```javascript
+const LOGIN_URL = 'https://example.com/index.html';
+const HOME_URL = 'https://example.com/home.html';
+
+async function loginAndGetContext(browser, userName, password) {
+    const context = await browser.newContext({
+        storageState: { cookies: [], origins: [] },
+    });
+    const page = await context.newPage();
+
+    await page.goto(LOGIN_URL);
+    await page.getByRole('textbox', { name: 'Email address or Student ID' }).fill(userName);
+    await page.getByRole('textbox', { name: 'Password' }).fill(password);
+    await page.getByRole('button', { name: 'Log In' }).click();
+    await page.waitForURL(HOME_URL);
+
+    return { page, context };
+}
+
+module.exports = { loginAndGetContext };
+
 ```
 
 Then the test becomes very expressive:
 
 ```javascript
-import { test, expect } from './fixtures';
+const { test, expect } = require('../fixtures');
 
-test('admin and user can be tested together', async ({ adminPage, userPage }) => {
-  await adminPage.goto('https://example.com/home.html');
-  await expect(adminPage.locator('#email')).toHaveText(process.env.ADMIN_EMAIL);
-
-  await userPage.goto('https://example.com/home.html');
-  await expect(userPage.locator('#email')).toHaveText(process.env.USER_EMAIL);
+test('admin can open the drop down page', async ({ adminPage }) => {
+    await adminPage.goto('https://example.com/home.html');
+    await adminPage.getByRole('link', { name: 'Drop down (current)' }).click();
+    await expect(adminPage).toHaveURL('https://example.com/drop-down.html');
 });
+
 ```
 
 This reads nicely:
@@ -497,59 +583,6 @@ Now test the flow.
 ```
 
 Use fixtures when your test needs multiple roles or dynamic authentication behavior.
-
----
-
-## Where `globalSetup` Fits
-
-Playwright also supports `globalSetup`.
-
-A global setup file runs before the test runner starts. You can use it to do things like:
-
-- seed a database
-- start external services
-- clear test data
-- prepare something outside Playwright Test
-
-You can also use it for authentication, and many older examples do that.
-
-But for UI authentication, the setup project pattern is usually cleaner.
-
-Why?
-
-Because a setup project is still a Playwright test. It gets normal test-runner behavior:
-
-- HTML report visibility
-- traces
-- retries
-- project configuration
-- easier debugging
-- cleaner dependency handling
-
-So my rule is:
-
-Use setup projects for Playwright authentication.
-
-Use `globalSetup` for work that truly belongs outside the test runner.
-
----
-
-## Quick Comparison
-
-| Approach | Best for | Main advantage | Main downside |
-| --- | --- | --- | --- |
-| Login inside every test | Very small experiments | Easy to understand | Slow and repetitive |
-| `globalSetup` | External one-time preparation | Runs before everything | Login is outside normal test flow |
-| Setup project with `storageState` | Standard authenticated test suites | Clean, reportable, reusable | Needs a little config |
-| Fixtures | Multi-role tests or dynamic users | Flexible and expressive | Needs careful caching |
-
-For most projects, start with:
-
-```text
-Setup project + storageState
-```
-
-Then add fixtures only when the test flow actually needs them.
 
 ---
 
@@ -609,38 +642,148 @@ If you use Playwright UI mode and your saved authentication expires, run the set
 
 ---
 
-## Final Recommendation
 
-If your tests need one logged-in user, use:
+## Detailed Strategy Comparison
+
+Here is the bigger picture.
+
+There is one baseline approach and four common authentication strategies in Playwright:
+
+1. Baseline: login inside every test, the naive approach.
+2. Strategy 1: hooks, using `beforeEach` or `beforeAll`.
+3. Strategy 2: `globalSetup`, the legacy approach.
+4. Strategy 3: setup project + `storageState`, the standard approach.
+5. Strategy 4: fixtures, the advanced approach.
+
+| Parameter | Login Inside Every Test | Hooks | `globalSetup` | Setup Project + `storageState` | Fixtures |
+| --- | --- | --- | --- | --- | --- |
+| Execution speed | Very slow | Slow | Fast | Very fast | Very fast |
+| Setup overhead | High, runs N times | High, often runs N times | Low, runs once | Low, runs once per project | Low, usually once per worker |
+| Test independence | Complete | Complete | Shared state | Complete | Complete |
+| Parallel execution support | Yes | Limited | Limited | Yes | Yes |
+| Multi-role support | Yes, but repetitive | Difficult | Difficult | Good per role or per test file | Excellent |
+| Debugging and reporting | Full traces | Limited or noisy | Limited | Full traces | Full traces |
+| Trace Viewer support | Yes | Partial | No | Yes | Yes |
+| Retry support | Yes | Partial | No | Yes | Yes |
+| CI/CD performance | Poor | Poor | Good | Excellent | Excellent |
+| Code duplication | Massive | Some | Minimal | Minimal | None |
+| Setup complexity | Very simple | Simple | Moderate | Moderate | Complex |
+| Maintainability | Poor | Fair | Good | Excellent | Excellent |
+| Session expiry handling | Auto retry through login | Manual | Manual | Re-run setup | Re-run setup |
+| Fresh state per test | Always | Always | Never | Via new context | Via new context |
+| Resource usage | High | High | Low | Medium | Medium |
+| Learning curve | Easy | Easy | Moderate | Moderate | Steep |
+| Scalability, 10 tests | Around 50s | Around 50s | Around 23s | Around 23s | Around 23s |
+| Scalability, 100 tests | Around 500s | Around 500s | Around 203s | Around 203s | Around 203s |
+| UI mode support | Yes | Yes | No | Yes | Yes |
+| Login failure impact | Isolated | All tests fail | All tests fail | Setup fails, tests skip | Setup fails, tests skip |
+
+These numbers are simple examples. Assume login takes around three seconds, and each actual test takes around two seconds.
 
 ```text
-setup project + storageState
+Setup Project:    23s for 10 tests, login 3s + tests 20s
+Fixtures:         23s for 10 tests, similar to setup project
+globalSetup:      23s for 10 tests, similar performance
+Hooks:            50s for 10 tests, login runs 10 times
+Login Every Test: 50s for 10 tests, login runs 10 times
 ```
 
-If your tests need admin and user roles, use:
+## Maintainability Score
 
-```text
-setup project + one storageState file per role
+| Strategy | Code Duplication | Test Readability | Configuration Complexity | Total Score |
+| --- | --- | --- | --- | --- |
+| Login every test | 10/10, worst | 3/10 | 1/10 | 14/40 |
+| Hooks | 6/10 | 5/10 | 3/10 | 18/40 |
+| `globalSetup` | 3/10 | 7/10 | 5/10 | 25/40 |
+| Setup project | 2/10 | 9/10 | 6/10 | 33/40 |
+| Fixtures | 1/10 | 10/10 | 7/10 | 34/40 |
+
+Fixtures score highest for maintainability when you need advanced flows, especially multi-role testing. Setup projects are close behind and are easier to start with.
+
+## Resource Usage
+
+Memory usage per worker:
+
+- Login every test: around 50MB per test.
+- `globalSetup`: around 100MB once.
+- Setup project: around 50MB per worker.
+- Fixtures: around 50MB per worker, plus extra for multi-role tests.
+- Hooks: around 50MB per test because the login flow is recreated.
+
+CPU usage:
+
+- Login every test: high because login repeats.
+- `globalSetup`: low because it runs once.
+- Setup project: low because setup runs once.
+- Fixtures: low because authenticated contexts can be reused carefully.
+- Hooks: high because login repeats.
+
+## Decision Matrix
+
+```mermaid
+graph TD
+    A[Start] --> B{Number of Tests?}
+    B -->|Less than 5| C{Hooks or Login Every Test}
+    B -->|More than 5| D{Single Role or Multi-Role?}
+
+    D -->|Single Role| E{Need Fresh State?}
+    D -->|Multi-Role| F{Test Needs Multiple Roles Simultaneously?}
+
+    E -->|Yes| G[Use Hooks with Fresh Login]
+    E -->|No| H[Use Setup Project + storageState]
+
+    F -->|Yes| I[Use Fixtures]
+    F -->|No| J[Setup Project + storageState per role]
+
+    C -->|Quick POC| K[Login Every Test]
+    C -->|Simpler| L[Hooks]
 ```
 
-If a single test needs multiple logged-in users at the same time, use:
+## Quick Decision Table
 
-```text
-fixtures that create adminPage, userPage, or managerPage
-```
+| Scenario | Recommended Strategy | Reason |
+| --- | --- | --- |
+| Proof of concept, 1-5 tests | Hooks or login every test | Simplicity over performance |
+| Standard test suite, 10-100 tests | Setup project + `storageState` | Best balance of speed and simplicity |
+| Enterprise suite, 100+ tests | Setup project + `storageState` plus fixtures | Scalable and maintainable |
+| Multi-role tests | Fixtures | Cleanest multi-role support |
+| Tests needing fresh state per run | Hooks | Easy per-test fresh login |
+| Different roles in the same test | Fixtures | Cleanest way to handle multiple contexts |
+| CI/CD pipeline | Setup project + `storageState` | Fast execution |
+| Local development | Setup project + `storageState` or fixtures | Quick feedback loop |
+| Database setup or seeding | `globalSetup` | Better for non-authentication tasks |
+| One-off admin tasks | `globalSetup` | Useful for quick one-time setup |
+| Multiple browser testing | Setup project + `storageState` | Best parallel browser support |
+| Dynamic credentials | Hooks | Easy to parameterize |
 
-And keep `globalSetup` for non-authentication preparation unless you have a specific reason to run authentication outside the Playwright Test lifecycle.
+## The 80/20 Rule
 
-Authentication should not make every test longer and harder to read.
+For most teams, the choice is simpler than it looks.
 
-Let Playwright log in once, save the state, and let your tests focus on the feature they are actually testing.
+Use setup project + `storageState` for around 80% of cases:
+
+- fastest execution
+- clean code
+- good debugging
+- easy maintenance
+
+Use fixtures for around 15% of cases:
+
+- multi-role tests
+- complex workflows
+- multiple authenticated contexts in one test
+
+Use hooks, `globalSetup`, or login inside every test for the remaining 5%:
+
+- quick prototypes
+- special scenarios
+- non-authentication setup
 
 ---
 
-## Tags
-
-Playwright, Test Automation, End-to-End Testing, JavaScript, QA Automation
-
 ## Further Reading
 
+Playwright authentication documentation: https://playwright.dev/docs/auth
+
+## Demo Link
 Playwright authentication documentation: https://playwright.dev/docs/auth
